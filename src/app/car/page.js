@@ -440,12 +440,12 @@ export default function CarDrawPage() {
                     transition={{ delay: 0.7 }}
                   >
                     <div className="flex items-center justify-center gap-2 mb-2">
-                      <Phone className="w-5 h-5 md:w-6 md:h-6 text-blue-700 flex-shrink-0" />
+                      <Phone className="w-5 h-5 md:w-6 md:h-6 text-blue-700" />
                       <p className="text-base md:text-lg font-bold text-blue-700">
                         Contact Number
                       </p>
                     </div>
-                    <div className="text-2xl sm:text-3xl md:text-4xl font-mono font-black text-blue-800 text-center tracking-normal sm:tracking-wider whitespace-nowrap overflow-hidden">
+                    <div className="text-2xl sm:text-3xl md:text-3xl font-mono font-black text-blue-800 text-center tracking-normal sm:tracking-wider whitespace-nowrap">
                       {winner.phoneNumber}
                     </div>
                   </motion.div>
