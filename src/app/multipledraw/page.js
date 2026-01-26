@@ -51,7 +51,7 @@ export default function MultipleDrawPage() {
     try {
       // Load Excel file from public folder
       const excelFilePath =
-        "/daily_winners_60Million_2025-11-29_to_2025-12-22_1000.xlsx";
+        "/daily_winners_60Million_2025-12-23_to_2026-01-15_1000.xlsx";
       console.log("Loading Excel file:", excelFilePath);
 
       const response = await fetch(excelFilePath);
@@ -120,7 +120,7 @@ export default function MultipleDrawPage() {
     try {
       // Download the existing Excel file from public folder
       const excelFilePath =
-        "/daily_winners_60Million_2025-11-29_to_2025-12-22_1000.xlsx";
+        "/daily_winners_60Million_2025-12-23_to_2026-01-15_1000.xlsx";
 
       const response = await fetch(excelFilePath);
       if (!response.ok) {
@@ -130,7 +130,7 @@ export default function MultipleDrawPage() {
       const blob = await response.blob();
       saveAs(
         blob,
-        "daily_winners_60Million_2025-11-29_to_2025-12-22_1000.xlsx"
+        "daily_winners_60Million_2025-12-23_to_2026-01-15_1000.xlsx"
       );
     } catch (err) {
       console.error("Error downloading Excel file:", err);

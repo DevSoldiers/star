@@ -17,16 +17,15 @@ export default function FiftyMultiplePage() {
   const [drawInfo, setDrawInfo] = useState(null);
 
   const drawDates = [
-    { startDate: "2025-12-01", endDate: "2025-12-02" },
-    { startDate: "2025-12-03", endDate: "2025-12-04" },
-    { startDate: "2025-12-05", endDate: "2025-12-06" },
-    { startDate: "2025-12-08", endDate: "2025-12-09" },
-    { startDate: "2025-12-10", endDate: "2025-12-11" },
-    { startDate: "2025-12-12", endDate: "2025-12-13" },
-    { startDate: "2025-12-15", endDate: "2025-12-16" },
-    { startDate: "2025-12-17", endDate: "2025-12-18" },
-    { startDate: "2025-12-19", endDate: "2025-12-20" },
-    { startDate: "2025-12-22", endDate: "2025-12-23" },
+    { startDate: "2025-12-24", endDate: "2025-12-25" },
+    { startDate: "2025-12-26", endDate: "2025-12-27" },
+    { startDate: "2025-12-28", endDate: "2025-12-29" },
+    { startDate: "2025-12-31", endDate: "2026-01-01" },
+    { startDate: "2026-01-02", endDate: "2026-01-03" },
+    { startDate: "2026-01-04", endDate: "2026-01-05" },
+    { startDate: "2026-01-07", endDate: "2026-01-08" },
+    { startDate: "2026-01-09", endDate: "2026-01-10" },
+    { startDate: "2026-01-11", endDate: "2026-01-12" },
   ];
 
   // Set default dates (today as end date, 7 days ago as start date)

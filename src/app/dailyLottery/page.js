@@ -9,7 +9,7 @@ const PRIZES = [
   {
     id: 1,
     place: "1st Prize",
-    amount: "25,000",
+    amount: "50,000",
     color: "from-yellow-400 via-yellow-500 to-orange-500",
     icon: Trophy,
     bgGlow: "bg-yellow-500/20",

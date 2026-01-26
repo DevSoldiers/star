@@ -61,31 +61,27 @@ const shouldDropHeader = (rows) => {
   return DEFAULT_HEADER_HINTS.some((hint) => lower.includes(hint));
 };
 
-async function readExcelFile(file) {
+async function readExcelFile(file, onProgress = null) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
 
-    reader.onload = (event) => {
+    reader.onload = async (event) => {
       try {
         const data = event.target.result;
-        let workbook;
 
-        try {
-          workbook = XLSX.read(data, {
-            type: "binary",
-            cellDates: true,
-            cellNF: false,
-            cellText: false,
-          });
-        } catch (binaryError) {
-          const buffer = new Uint8Array(data);
-          workbook = XLSX.read(buffer, {
-            type: "array",
-            cellDates: true,
-            cellNF: false,
-            cellText: false,
-          });
-        }
+        if (onProgress) onProgress("Parsing Excel file...");
+
+        // Read as array buffer for better memory efficiency
+        const workbook = XLSX.read(data, {
+          type: "array",
+          cellDates: false,
+          cellNF: false,
+          cellText: false,
+          cellStyles: false,
+          sheetStubs: false,
+          bookVBA: false,
+          bookDeps: false,
+        });
 
         const firstSheetName = workbook.SheetNames[0];
         const worksheet = workbook.Sheets[firstSheetName];
@@ -95,13 +91,56 @@ async function readExcelFile(file) {
           return;
         }
 
-        const rawRows = XLSX.utils.sheet_to_json(worksheet, {
-          header: 1,
-          raw: true,
-          defval: null,
-        });
+        // Get the range to understand data size
+        const range = XLSX.utils.decode_range(worksheet["!ref"]);
+        const totalRows = range.e.r - range.s.r;
 
-        resolve(rawRows.map((row) => (Array.isArray(row) ? row[0] : row)));
+        if (totalRows === 0) {
+          reject(new Error("Excel file appears to be empty."));
+          return;
+        }
+
+        if (onProgress) {
+          onProgress(`Processing ${totalRows.toLocaleString()} rows...`);
+        }
+
+        const results = [];
+        const BATCH_SIZE = 50000; // Process 50k rows at a time
+
+        // Process rows in batches
+        for (
+          let batchStart = range.s.r;
+          batchStart <= range.e.r;
+          batchStart += BATCH_SIZE
+        ) {
+          const batchEnd = Math.min(batchStart + BATCH_SIZE - 1, range.e.r);
+
+          if (onProgress) {
+            onProgress(
+              `Reading rows ${batchStart} to ${batchEnd} of ${totalRows.toLocaleString()}...`
+            );
+          }
+
+          // Extract data for this batch
+          for (let rowNum = batchStart; rowNum <= batchEnd; rowNum++) {
+            const cellAddress = XLSX.utils.encode_cell({
+              r: rowNum,
+              c: range.s.c,
+            });
+            const cell = worksheet[cellAddress];
+
+            if (cell && cell.v !== undefined && cell.v !== null) {
+              results.push(cell.v);
+            } else {
+              results.push(null);
+            }
+          }
+
+          // Allow UI to breathe every batch
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+
+        resolve(results);
       } catch (error) {
         reject(error);
       }
@@ -110,7 +149,7 @@ async function readExcelFile(file) {
     reader.onerror = () =>
       reject(new Error("Failed to read the Excel file. Please try again."));
 
-    reader.readAsBinaryString(file);
+    reader.readAsArrayBuffer(file);
   });
 }
 
@@ -121,30 +160,39 @@ const resolveDelimiterValue = (option) => {
   return option;
 };
 
-async function readCsvFile(file, delimiterOption = "auto") {
+async function readCsvFile(file, delimiterOption = "auto", onProgress = null) {
   return new Promise((resolve, reject) => {
+    const results = [];
+    let rowCount = 0;
+    let lastProgressUpdate = 0;
+
     Papa.parse(file, {
       worker: true,
-      step: undefined,
-      complete: (results) => {
-        if (results.errors?.length) {
-          reject(
-            new Error(
-              results.errors[0]?.message ||
-                "Failed to parse CSV file. Please confirm the format."
-            )
-          );
+      step: (row) => {
+        if (row.errors?.length) {
+          // Skip rows with errors but don't fail entirely
           return;
         }
 
-        resolve(
-          results.data.map((row) => {
-            if (Array.isArray(row)) {
-              return row[0];
-            }
-            return row;
-          })
-        );
+        const value = Array.isArray(row.data) ? row.data[0] : row.data;
+        results.push(value);
+        rowCount++;
+
+        // Update progress every 100k rows
+        if (onProgress && rowCount - lastProgressUpdate >= 100000) {
+          onProgress(
+            `Reading CSV... ${rowCount.toLocaleString()} rows processed`
+          );
+          lastProgressUpdate = rowCount;
+        }
+      },
+      complete: () => {
+        if (onProgress) {
+          onProgress(
+            `Completed reading ${results.length.toLocaleString()} rows`
+          );
+        }
+        resolve(results);
       },
       error: (error) => {
         reject(
@@ -156,6 +204,7 @@ async function readCsvFile(file, delimiterOption = "auto") {
       },
       skipEmptyLines: true,
       delimiter: resolveDelimiterValue(delimiterOption),
+      fastMode: true,
     });
   });
 }
@@ -165,12 +214,18 @@ async function extractColumnValues(file, options = {}) {
 
   let rows;
 
+  const onProgress = options.onProgress || null;
+
   if (extension === "csv") {
-    rows = await readCsvFile(file, options.delimiter);
+    rows = await readCsvFile(file, options.delimiter, onProgress);
   } else if (extension === "xlsx" || extension === "xls") {
-    rows = await readExcelFile(file);
+    rows = await readExcelFile(file, onProgress);
   } else {
     throw new Error("Unsupported file type. Please upload CSV or Excel files.");
+  }
+
+  if (onProgress) {
+    onProgress("Processing and normalizing values...");
   }
 
   const values = rows.map(normalizeValue).filter((value) => value !== "");
@@ -179,6 +234,12 @@ async function extractColumnValues(file, options = {}) {
 
   if (shouldDropHeader(filteredValues)) {
     filteredValues = filteredValues.slice(1);
+  }
+
+  if (onProgress) {
+    onProgress(
+      `Preparing ${filteredValues.length.toLocaleString()} entries...`
+    );
   }
 
   return filteredValues.map((original) => ({
@@ -205,6 +266,7 @@ const UniqueExcelPage = () => {
   const [statusMessage, setStatusMessage] = useState("");
   const [errorMessage, setErrorMessage] = useState("");
   const [delimiterOption, setDelimiterOption] = useState("auto");
+  const [outputFormat, setOutputFormat] = useState("csv"); // csv or excel
 
   const stats = useMemo(() => {
     const totalPrimary = primarySet?.size ?? 0;
@@ -230,8 +292,30 @@ const UniqueExcelPage = () => {
     try {
       const values = await extractColumnValues(file, {
         delimiter: delimiterOption,
+        onProgress: (msg) => setStatusMessage(msg),
       });
-      const canonicalValues = values.map((item) => item.canonical);
+
+      setStatusMessage("Building lookup set for File 1...");
+
+      // Build the Set in chunks to avoid blocking UI
+      const canonicalValues = [];
+      const CHUNK_SIZE = 100000;
+
+      for (let i = 0; i < values.length; i += CHUNK_SIZE) {
+        const chunk = values.slice(i, i + CHUNK_SIZE);
+        canonicalValues.push(...chunk.map((item) => item.canonical));
+
+        if (values.length > CHUNK_SIZE) {
+          setStatusMessage(
+            `Processing File 1... ${Math.min(
+              i + CHUNK_SIZE,
+              values.length
+            ).toLocaleString()} of ${values.length.toLocaleString()}`
+          );
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+      }
+
       const nextPrimarySet = new Set(canonicalValues);
       setPrimarySet(nextPrimarySet);
       setStatusMessage(
@@ -276,6 +360,7 @@ const UniqueExcelPage = () => {
     try {
       const values = await extractColumnValues(file, {
         delimiter: delimiterOption,
+        onProgress: (msg) => setStatusMessage(msg),
       });
       setCompareValues(values);
       setStatusMessage(
@@ -325,18 +410,21 @@ const UniqueExcelPage = () => {
       });
     };
 
-    const chunks = chunkArray(compare, 200000);
+    const chunks = chunkArray(compare, 100000); // Smaller chunks for better progress updates
 
     for (let i = 0; i < chunks.length; i += 1) {
       processChunk(chunks[i]);
 
       if (chunks.length > 1) {
+        const processed = Math.min((i + 1) * 100000, compare.length);
         setStatusMessage(
-          `Computing unique records... (${i + 1}/${chunks.length} chunks)`
+          `Computing unique records... ${processed.toLocaleString()} of ${compare.length.toLocaleString()} processed (${
+            i + 1
+          }/${chunks.length} chunks)`
         );
         // Give the UI time to breathe if files are extremely large
         // eslint-disable-next-line no-await-in-loop
-        await new Promise((resolve) => setTimeout(resolve, 0));
+        await new Promise((resolve) => setTimeout(resolve, 10));
       }
     }
 
@@ -349,33 +437,172 @@ const UniqueExcelPage = () => {
     setLoading(false);
   };
 
-  const handleDownloadUnique = () => {
+  const handleDownloadUnique = async () => {
     if (!uniqueValues.length) {
       return;
     }
 
-    const header = [["Unique Numbers (File 2 minus File 1)"]];
-    const data = uniqueValues.map((value) => [value]);
-    const worksheet = XLSX.utils.aoa_to_sheet(header.concat(data));
-    const workbook = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(workbook, worksheet, "Unique");
-    const workbookArray = XLSX.write(workbook, {
-      bookType: "xlsx",
-      type: "array",
-    });
+    setLoading(true);
+    setStatusMessage("Preparing download...");
 
-    const blob = new Blob([workbookArray], {
-      type: "application/octet-stream",
-    });
+    try {
+      const baseName1 = primaryFileName.replace(/\.[^.]+$/, "");
+      const baseName2 = compareFileName.replace(/\.[^.]+$/, "");
+      const baseFileName =
+        baseName1 && baseName2
+          ? `${baseName2}_minus_${baseName1}_unique`
+          : "unique-records";
 
-    const baseName1 = primaryFileName.replace(/\.[^.]+$/, "");
-    const baseName2 = compareFileName.replace(/\.[^.]+$/, "");
-    const fileName =
-      baseName1 && baseName2
-        ? `${baseName2}_minus_${baseName1}_unique.xlsx`
-        : "unique-records.xlsx";
+      // If result set is large, split into multiple files
+      const MAX_ROWS_PER_FILE = 500000; // 500K rows per file to avoid memory issues
 
-    saveAs(blob, fileName);
+      if (outputFormat === "csv") {
+        // CSV Export - much smaller and faster
+        if (uniqueValues.length > MAX_ROWS_PER_FILE) {
+          // Split into multiple CSV files
+          const totalFiles = Math.ceil(uniqueValues.length / MAX_ROWS_PER_FILE);
+
+          for (let fileIndex = 0; fileIndex < totalFiles; fileIndex++) {
+            const start = fileIndex * MAX_ROWS_PER_FILE;
+            const end = Math.min(
+              start + MAX_ROWS_PER_FILE,
+              uniqueValues.length
+            );
+            const chunk = uniqueValues.slice(start, end);
+
+            setStatusMessage(
+              `Creating CSV file ${
+                fileIndex + 1
+              } of ${totalFiles} (${chunk.length.toLocaleString()} rows)...`
+            );
+
+            const header = "Unique Numbers (File 2 minus File 1)\n";
+            const csvContent = header + chunk.join("\n");
+            const blob = new Blob([csvContent], {
+              type: "text/csv;charset=utf-8;",
+            });
+
+            const fileName = `${baseFileName}_part${
+              fileIndex + 1
+            }_of_${totalFiles}.csv`;
+            saveAs(blob, fileName);
+
+            // Allow UI to breathe between file downloads
+            await new Promise((resolve) => setTimeout(resolve, 200));
+          }
+
+          setStatusMessage(
+            `✅ Downloaded ${totalFiles} CSV files containing ${uniqueValues.length.toLocaleString()} unique records.`
+          );
+        } else {
+          // Single CSV file
+          setStatusMessage("Creating CSV file...");
+
+          const header = "Unique Numbers (File 2 minus File 1)\n";
+          const csvContent = header + uniqueValues.join("\n");
+          const blob = new Blob([csvContent], {
+            type: "text/csv;charset=utf-8;",
+          });
+
+          const fileName = `${baseFileName}.csv`;
+          saveAs(blob, fileName);
+
+          setStatusMessage(
+            `✅ Downloaded ${uniqueValues.length.toLocaleString()} unique records.`
+          );
+        }
+      } else {
+        // Excel Export - larger files
+        if (uniqueValues.length > MAX_ROWS_PER_FILE) {
+          // Split into multiple Excel files
+          const totalFiles = Math.ceil(uniqueValues.length / MAX_ROWS_PER_FILE);
+
+          for (let fileIndex = 0; fileIndex < totalFiles; fileIndex++) {
+            const start = fileIndex * MAX_ROWS_PER_FILE;
+            const end = Math.min(
+              start + MAX_ROWS_PER_FILE,
+              uniqueValues.length
+            );
+            const chunk = uniqueValues.slice(start, end);
+
+            setStatusMessage(
+              `Creating Excel file ${
+                fileIndex + 1
+              } of ${totalFiles} (${chunk.length.toLocaleString()} rows)...`
+            );
+
+            const header = [["Unique Numbers (File 2 minus File 1)"]];
+            const data = chunk.map((value) => [value]);
+            const worksheet = XLSX.utils.aoa_to_sheet(header.concat(data));
+            const workbook = XLSX.utils.book_new();
+            XLSX.utils.book_append_sheet(workbook, worksheet, "Unique");
+            const workbookArray = XLSX.write(workbook, {
+              bookType: "xlsx",
+              type: "array",
+              compression: true,
+            });
+
+            const blob = new Blob([workbookArray], {
+              type: "application/octet-stream",
+            });
+
+            const fileName = `${baseFileName}_part${
+              fileIndex + 1
+            }_of_${totalFiles}.xlsx`;
+            saveAs(blob, fileName);
+
+            // Allow UI to breathe between file downloads
+            await new Promise((resolve) => setTimeout(resolve, 500));
+          }
+
+          setStatusMessage(
+            `✅ Downloaded ${totalFiles} Excel files containing ${uniqueValues.length.toLocaleString()} unique records.`
+          );
+        } else {
+          // Single Excel file
+          setStatusMessage("Creating Excel file...");
+
+          const header = [["Unique Numbers (File 2 minus File 1)"]];
+          const data = uniqueValues.map((value) => [value]);
+          const worksheet = XLSX.utils.aoa_to_sheet(header.concat(data));
+          const workbook = XLSX.utils.book_new();
+          XLSX.utils.book_append_sheet(workbook, worksheet, "Unique");
+          const workbookArray = XLSX.write(workbook, {
+            bookType: "xlsx",
+            type: "array",
+            compression: true,
+          });
+
+          const blob = new Blob([workbookArray], {
+            type: "application/octet-stream",
+          });
+
+          const fileName = `${baseFileName}.xlsx`;
+          saveAs(blob, fileName);
+
+          setStatusMessage(
+            `✅ Downloaded ${uniqueValues.length.toLocaleString()} unique records.`
+          );
+        }
+      }
+
+      setTimeout(() => {
+        setStatusMessage(
+          `Found ${uniqueValues.length.toLocaleString()} unique record${
+            uniqueValues.length === 1 ? "" : "s"
+          } present in File 2 but not in File 1.`
+        );
+      }, 3000);
+    } catch (error) {
+      console.error("Download error:", error);
+      setErrorMessage(
+        `Failed to create download: ${
+          error.message || "Unknown error"
+        }. Try CSV format for large datasets.`
+      );
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
@@ -393,7 +620,7 @@ const UniqueExcelPage = () => {
         </header>
 
         <section className="grid gap-6 md:grid-cols-2">
-          <div className="md:col-span-2 rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-5 flex flex-col gap-3">
+          <div className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-5 flex flex-col gap-3">
             <div>
               <h2 className="text-lg font-semibold text-gray-800 dark:text-gray-200">
                 ⚙️ CSV Delimiter
@@ -414,6 +641,43 @@ const UniqueExcelPage = () => {
                 </option>
               ))}
             </select>
+          </div>
+
+          <div className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-5 flex flex-col gap-3">
+            <div>
+              <h2 className="text-lg font-semibold text-gray-800 dark:text-gray-200">
+                📥 Output Format
+              </h2>
+              <p className="mt-1 text-xs text-gray-600 dark:text-gray-400">
+                Choose download format. CSV is 5-10x smaller and faster.
+              </p>
+            </div>
+            <div className="flex flex-col gap-2">
+              <label className="flex items-center cursor-pointer">
+                <input
+                  type="radio"
+                  value="csv"
+                  checked={outputFormat === "csv"}
+                  onChange={(e) => setOutputFormat(e.target.value)}
+                  className="mr-2"
+                />
+                <span className="text-sm text-gray-700 dark:text-gray-300">
+                  CSV (Smaller, ~5-10MB per 500K rows) ⚡
+                </span>
+              </label>
+              <label className="flex items-center cursor-pointer">
+                <input
+                  type="radio"
+                  value="excel"
+                  checked={outputFormat === "excel"}
+                  onChange={(e) => setOutputFormat(e.target.value)}
+                  className="mr-2"
+                />
+                <span className="text-sm text-gray-700 dark:text-gray-300">
+                  Excel (Larger, ~40MB per 500K rows)
+                </span>
+              </label>
+            </div>
           </div>
 
           <div className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-gray-50 dark:bg-gray-950/40 p-5">
@@ -499,9 +763,10 @@ const UniqueExcelPage = () => {
               <button
                 type="button"
                 onClick={handleDownloadUnique}
-                className="inline-flex items-center gap-2 rounded-full bg-red-600 px-5 py-2 text-sm font-semibold text-white shadow-lg hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500"
+                disabled={loading}
+                className="inline-flex items-center gap-2 rounded-full bg-red-600 px-5 py-2 text-sm font-semibold text-white shadow-lg hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500 disabled:opacity-60 disabled:cursor-not-allowed"
               >
-                ⬇️ Download as Excel
+                ⬇️ Download as {outputFormat === "csv" ? "CSV" : "Excel"}
               </button>
             </div>
 
@@ -556,12 +821,14 @@ const UniqueExcelPage = () => {
               automatically ignore header rows that look like labels.
             </li>
             <li>
-              CSV and Excel formats are supported. For massive datasets, prefer
-              .xlsx for better accuracy.
+              CSV and Excel formats are supported. For files over 2M rows, CSV
+              format is recommended for better performance and memory handling.
             </li>
             <li>
-              The download button exports an Excel file containing only the
-              numbers unique to File 2.
+              The download button exports your chosen format (CSV or Excel)
+              containing only the numbers unique to File 2. Large result sets
+              (500K+ rows) are automatically split into multiple files. CSV
+              files are 5-10x smaller.
             </li>
           </ul>
         </section>

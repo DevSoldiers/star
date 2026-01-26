@@ -6,25 +6,78 @@ import { saveAs } from "file-saver";
 import Papa from "papaparse";
 
 export default function ExcelCsvSplitter() {
-  const [chunkSize, setChunkSize] = useState(600000);
+  const [chunkSize, setChunkSize] = useState(1000000);
   const [loading, setLoading] = useState(false);
   const [fileNamePrefix, setFileNamePrefix] = useState("Newchunk");
   const [progress, setProgress] = useState("");
   const [error, setError] = useState("");
   const [fileInputKey, setFileInputKey] = useState(Date.now());
+  const [outputFormat, setOutputFormat] = useState("csv"); // csv or excel
 
-  const exportChunkAsync = async (dataChunk, index) => {
-    return new Promise((resolve) => {
+  const exportChunkAsync = async (dataChunk, index, format = "csv") => {
+    return new Promise((resolve, reject) => {
       setTimeout(() => {
-        const header = [["Phone"]];
-        const finalData = header.concat(dataChunk);
-        const ws = XLSX.utils.aoa_to_sheet(finalData);
-        const wb = XLSX.utils.book_new();
-        XLSX.utils.book_append_sheet(wb, ws, `Chunk_${index}`);
-        const wbout = XLSX.write(wb, { bookType: "xlsx", type: "array" });
-        const blob = new Blob([wbout], { type: "application/octet-stream" });
-        saveAs(blob, `${fileNamePrefix}_${index}.xlsx`);
-        resolve();
+        try {
+          if (format === "csv") {
+            // CSV export - much smaller file size and faster
+            const header = "Phone\n";
+            const csvContent =
+              header + dataChunk.map((row) => row[0]).join("\n");
+            const blob = new Blob([csvContent], {
+              type: "text/csv;charset=utf-8;",
+            });
+            saveAs(blob, `${fileNamePrefix}_${index}.csv`);
+          } else {
+            // Excel export - larger files but better compatibility
+            const MAX_ROWS = 500000;
+
+            if (dataChunk.length > MAX_ROWS) {
+              // Split large chunk into sub-chunks
+              const subChunks = Math.ceil(dataChunk.length / MAX_ROWS);
+
+              for (let i = 0; i < subChunks; i++) {
+                const start = i * MAX_ROWS;
+                const end = Math.min(start + MAX_ROWS, dataChunk.length);
+                const subChunk = dataChunk.slice(start, end);
+
+                const header = [["Phone"]];
+                const finalData = header.concat(subChunk);
+                const ws = XLSX.utils.aoa_to_sheet(finalData);
+                const wb = XLSX.utils.book_new();
+                XLSX.utils.book_append_sheet(wb, ws, `Chunk_${index}_${i + 1}`);
+                const wbout = XLSX.write(wb, {
+                  bookType: "xlsx",
+                  type: "array",
+                  compression: true, // Enable compression to reduce file size
+                });
+                const blob = new Blob([wbout], {
+                  type: "application/octet-stream",
+                });
+                saveAs(blob, `${fileNamePrefix}_${index}_part${i + 1}.xlsx`);
+              }
+            } else {
+              // Normal export for smaller chunks
+              const header = [["Phone"]];
+              const finalData = header.concat(dataChunk);
+              const ws = XLSX.utils.aoa_to_sheet(finalData);
+              const wb = XLSX.utils.book_new();
+              XLSX.utils.book_append_sheet(wb, ws, `Chunk_${index}`);
+              const wbout = XLSX.write(wb, {
+                bookType: "xlsx",
+                type: "array",
+                compression: true, // Enable compression to reduce file size
+              });
+              const blob = new Blob([wbout], {
+                type: "application/octet-stream",
+              });
+              saveAs(blob, `${fileNamePrefix}_${index}.xlsx`);
+            }
+          }
+          resolve();
+        } catch (error) {
+          console.error("Export error:", error);
+          reject(error);
+        }
       }, 0);
     });
   };
@@ -40,39 +93,21 @@ export default function ExcelCsvSplitter() {
       console.log("FileReader onload triggered");
       try {
         const data = e.target.result;
-        console.log("Data loaded, length:", data ? data.length : 0);
+        console.log("Data loaded, buffer length:", data.byteLength);
 
-        // Try multiple read methods for better compatibility
-        let workbook;
-        try {
-          console.log("Attempting to read as binary string...");
-          // Try reading as binary string first (works better for large files)
-          workbook = XLSX.read(data, {
-            type: "binary",
-            cellDates: true,
-            cellNF: false,
-            cellText: false,
-          });
-          console.log("Successfully read as binary string");
-        } catch (err1) {
-          console.log("Binary string failed, trying array buffer:", err1);
-          try {
-            // Fallback to array buffer
-            const arrayBuffer = new Uint8Array(data);
-            workbook = XLSX.read(arrayBuffer, {
-              type: "array",
-              cellDates: true,
-              cellNF: false,
-              cellText: false,
-            });
-            console.log("Successfully read as array buffer");
-          } catch (err2) {
-            console.error("Both read methods failed:", err2);
-            throw new Error(
-              "Unable to read Excel file. Please ensure it's a valid .xlsx or .xls file."
-            );
-          }
-        }
+        setProgress("Parsing Excel file...");
+
+        // Read as array buffer for better memory efficiency
+        const workbook = XLSX.read(data, {
+          type: "array",
+          cellDates: false,
+          cellNF: false,
+          cellText: false,
+          cellStyles: false,
+          sheetStubs: false, // Skip empty cells
+          bookVBA: false, // Skip VBA
+          bookDeps: false, // Skip dependencies
+        });
 
         // Get the first sheet
         console.log("Workbook sheets:", workbook.SheetNames);
@@ -84,68 +119,108 @@ export default function ExcelCsvSplitter() {
         }
 
         console.log("Worksheet found:", firstSheetName);
-        setProgress("Parsing Excel data...");
 
-        // Convert to array of arrays with raw values
-        const jsonData = XLSX.utils.sheet_to_json(worksheet, {
-          header: 1,
-          raw: true,
-          defval: null,
-        });
+        // Get the range to understand data size
+        const range = XLSX.utils.decode_range(worksheet["!ref"]);
+        const totalRows = range.e.r - range.s.r; // End row - Start row
+        console.log("Total rows in sheet:", totalRows);
 
-        console.log("JSON data length:", jsonData.length);
-        console.log("First 3 rows:", jsonData.slice(0, 3));
-
-        if (!jsonData || jsonData.length === 0) {
+        if (totalRows === 0) {
           throw new Error("Excel file appears to be empty.");
         }
 
-        // Remove header row if it exists and filter out empty rows
-        const dataRows = jsonData
-          .slice(1)
-          .filter((row) => row && row[0] && String(row[0]).trim() !== "");
-
-        console.log("Valid data rows found:", dataRows.length);
-        console.log("First 3 data rows:", dataRows.slice(0, 3));
-
-        if (dataRows.length === 0) {
-          throw new Error("No valid data rows found in the Excel file.");
-        }
-
         setProgress(
-          `Found ${dataRows.length.toLocaleString()} rows. Splitting into chunks...`
+          `Found approximately ${totalRows.toLocaleString()} rows. Processing in batches...`
         );
 
-        const totalChunks = Math.ceil(dataRows.length / chunkSize);
-
-        // Split into chunks and export
+        const totalChunks = Math.ceil(totalRows / chunkSize);
         let chunkIndex = 1;
-        for (let i = 0; i < dataRows.length; i += chunkSize) {
-          const chunk = dataRows
-            .slice(i, i + chunkSize)
-            .map((row) => [String(row[0]).trim()]);
+        let processedRows = 0;
 
-          setProgress(
-            `Exporting chunk ${chunkIndex} of ${totalChunks} (${chunk.length.toLocaleString()} rows)...`
-          );
+        // Process in batches to avoid memory overflow
+        const BATCH_SIZE = Math.min(chunkSize, 100000); // Process max 100k rows at a time
 
-          await exportChunkAsync(chunk, chunkIndex++);
+        for (
+          let startRow = range.s.r + 1;
+          startRow <= range.e.r;
+          startRow += chunkSize
+        ) {
+          const endRow = Math.min(startRow + chunkSize - 1, range.e.r);
+          const chunkData = [];
 
-          // Small delay to prevent UI freezing
+          // Read rows in smaller batches within the chunk
+          for (
+            let batchStart = startRow;
+            batchStart <= endRow;
+            batchStart += BATCH_SIZE
+          ) {
+            const batchEnd = Math.min(batchStart + BATCH_SIZE - 1, endRow);
+
+            setProgress(
+              `Processing chunk ${chunkIndex} of ${totalChunks} (rows ${batchStart} to ${batchEnd})...`
+            );
+
+            // Extract data for this batch
+            for (let rowNum = batchStart; rowNum <= batchEnd; rowNum++) {
+              const cellAddress = XLSX.utils.encode_cell({
+                r: rowNum,
+                c: range.s.c,
+              });
+              const cell = worksheet[cellAddress];
+
+              if (cell && cell.v !== undefined && cell.v !== null) {
+                const value = String(cell.v).trim();
+                if (value !== "") {
+                  chunkData.push([value]);
+                }
+              }
+            }
+
+            // Allow UI to breathe
+            await new Promise((resolve) => setTimeout(resolve, 10));
+          }
+
+          if (chunkData.length > 0) {
+            setProgress(
+              `Exporting chunk ${chunkIndex} of ${totalChunks} (${chunkData.length.toLocaleString()} rows)...`
+            );
+
+            await exportChunkAsync(chunkData, chunkIndex, outputFormat);
+            processedRows += chunkData.length;
+            chunkIndex++;
+          }
+
+          // Force garbage collection hint
+          if (typeof global !== "undefined" && global.gc) {
+            global.gc();
+          }
+
+          // Allow browser to free memory
           await new Promise((resolve) => setTimeout(resolve, 100));
         }
 
         setProgress(
-          `✅ Complete! Created ${totalChunks} file(s) from ${dataRows.length.toLocaleString()} rows.`
+          `✅ Complete! Created ${
+            chunkIndex - 1
+          } file(s) from ${processedRows.toLocaleString()} rows.`
         );
         setLoading(false);
-        setFileInputKey(Date.now()); // Reset file input
+        setFileInputKey(Date.now());
         setTimeout(() => setProgress(""), 5000);
       } catch (error) {
         console.error("Excel parsing error:", error);
-        const errorMsg =
-          error.message ||
-          "Failed to parse the Excel file. Please check the file format.";
+        let errorMsg = error.message || "Failed to parse the Excel file.";
+
+        // Detect memory errors
+        if (
+          error.message &&
+          (error.message.includes("memory") ||
+            error.message.includes("allocation"))
+        ) {
+          errorMsg =
+            "File too large for browser memory. Try using a smaller file or split it externally first.";
+        }
+
         setError(errorMsg);
         setLoading(false);
         setProgress("");
@@ -159,77 +234,79 @@ export default function ExcelCsvSplitter() {
       setProgress("");
     };
 
-    // Read as binary string for better large file support
-    console.log("Starting to read file as binary string");
-    reader.readAsBinaryString(file);
+    // Read as array buffer for better memory efficiency
+    console.log("Starting to read file as array buffer");
+    reader.readAsArrayBuffer(file);
   };
 
   const handleCsvUpload = (file) => {
-    console.log("Starting CSV upload handler");
+    console.log("Starting CSV upload handler with streaming");
     setLoading(true);
     setProgress("Reading CSV file...");
     setError("");
 
-    Papa.parse(file, {
-      complete: async function (results) {
-        console.log("CSV parse complete");
-        try {
-          console.log(
-            "CSV results data length:",
-            results.data ? results.data.length : 0
-          );
+    let currentChunk = [];
+    let chunkIndex = 1;
+    let totalRows = 0;
+    let isFirstRow = true;
 
-          if (!results.data || results.data.length === 0) {
-            throw new Error("CSV file appears to be empty.");
+    Papa.parse(file, {
+      worker: true, // Use web worker for better performance
+      step: async function (results, parser) {
+        // Skip empty rows and header
+        if (isFirstRow) {
+          isFirstRow = false;
+          return;
+        }
+
+        const row = results.data;
+        if (row && row[0] && String(row[0]).trim() !== "") {
+          currentChunk.push([String(row[0]).trim()]);
+          totalRows++;
+
+          // When chunk is full, export it
+          if (currentChunk.length >= chunkSize) {
+            parser.pause(); // Pause parsing while we export
+
+            setProgress(
+              `Exporting chunk ${chunkIndex} (${currentChunk.length.toLocaleString()} rows)...`
+            );
+
+            await exportChunkAsync(currentChunk, chunkIndex, outputFormat);
+            chunkIndex++;
+            currentChunk = []; // Clear chunk
+
+            // Allow UI to breathe
+            await new Promise((resolve) => setTimeout(resolve, 100));
+
+            parser.resume(); // Resume parsing
+          }
+        }
+      },
+      complete: async function () {
+        console.log("CSV streaming parse complete");
+        try {
+          // Export any remaining data in the last chunk
+          if (currentChunk.length > 0) {
+            setProgress(
+              `Exporting final chunk ${chunkIndex} (${currentChunk.length.toLocaleString()} rows)...`
+            );
+            await exportChunkAsync(currentChunk, chunkIndex, outputFormat);
           }
 
-          console.log("First 3 CSV rows:", results.data.slice(0, 3));
-
-          // Filter out empty rows and get only the first column
-          const dataRows = results.data
-            .slice(1) // Skip header if exists
-            .filter((row) => row && row[0] && String(row[0]).trim() !== "")
-            .map((row) => [String(row[0]).trim()]);
-
-          console.log("Valid CSV data rows found:", dataRows.length);
-          console.log("First 3 data rows:", dataRows.slice(0, 3));
-
-          if (dataRows.length === 0) {
+          if (totalRows === 0) {
             throw new Error("No valid data rows found in the CSV file.");
           }
 
           setProgress(
-            `Found ${dataRows.length.toLocaleString()} rows. Splitting into chunks...`
-          );
-
-          const totalChunks = Math.ceil(dataRows.length / chunkSize);
-
-          // Split into chunks and export
-          let chunkIndex = 1;
-          for (let i = 0; i < dataRows.length; i += chunkSize) {
-            const chunk = dataRows.slice(i, i + chunkSize);
-
-            setProgress(
-              `Exporting chunk ${chunkIndex} of ${totalChunks} (${chunk.length.toLocaleString()} rows)...`
-            );
-
-            await exportChunkAsync(chunk, chunkIndex++);
-
-            // Small delay to prevent UI freezing
-            await new Promise((resolve) => setTimeout(resolve, 100));
-          }
-
-          setProgress(
-            `✅ Complete! Created ${totalChunks} file(s) from ${dataRows.length.toLocaleString()} rows.`
+            `✅ Complete! Created ${chunkIndex} file(s) from ${totalRows.toLocaleString()} rows.`
           );
           setLoading(false);
-          setFileInputKey(Date.now()); // Reset file input
+          setFileInputKey(Date.now());
           setTimeout(() => setProgress(""), 5000);
         } catch (error) {
-          console.error("CSV parsing error:", error);
-          const errorMsg =
-            error.message ||
-            "Failed to parse the CSV file. Please check the file format.";
+          console.error("CSV processing error:", error);
+          const errorMsg = error.message || "Failed to process the CSV file.";
           setError(errorMsg);
           setLoading(false);
           setProgress("");
@@ -244,6 +321,7 @@ export default function ExcelCsvSplitter() {
         setProgress("");
       },
       skipEmptyLines: true,
+      fastMode: true, // Use fast mode for better performance
     });
   };
 
@@ -316,6 +394,42 @@ export default function ExcelCsvSplitter() {
 
       <div className="mb-4">
         <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+          Output Format
+        </label>
+        <div className="flex gap-4">
+          <label className="flex items-center cursor-pointer">
+            <input
+              type="radio"
+              value="csv"
+              checked={outputFormat === "csv"}
+              onChange={(e) => setOutputFormat(e.target.value)}
+              className="mr-2"
+            />
+            <span className="text-sm text-gray-700 dark:text-gray-300">
+              CSV (Smaller, ~5-10MB per 500K rows) ⚡ Recommended
+            </span>
+          </label>
+          <label className="flex items-center cursor-pointer">
+            <input
+              type="radio"
+              value="excel"
+              checked={outputFormat === "excel"}
+              onChange={(e) => setOutputFormat(e.target.value)}
+              className="mr-2"
+            />
+            <span className="text-sm text-gray-700 dark:text-gray-300">
+              Excel (Larger, ~40MB per 500K rows)
+            </span>
+          </label>
+        </div>
+        <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+          CSV files are 5-10x smaller and faster to create. Excel files are more
+          compatible with some tools.
+        </p>
+      </div>
+
+      <div className="mb-4">
+        <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
           Select File
         </label>
         <input
@@ -363,9 +477,17 @@ export default function ExcelCsvSplitter() {
           📋 Instructions:
         </h3>
         <ul className="text-xs text-gray-600 dark:text-gray-400 space-y-1 list-disc list-inside">
-          <li>Supports Excel (.xlsx, .xls) and CSV files</li>
-          <li>Default chunk size is 500,000 rows</li>
-          <li>For 1M rows with 500K chunk size = 2 files</li>
+          <li>Supports Excel (.xlsx, .xls) and CSV input files</li>
+          <li>Default chunk size is 1,000,000 rows</li>
+          <li>
+            <strong>CSV output (recommended):</strong> 5-10x smaller files,
+            faster processing
+          </li>
+          <li>
+            <strong>Excel output:</strong> Larger files (40MB per 500K rows) but
+            better compatibility
+          </li>
+          <li>For 2M+ rows, CSV output is highly recommended</li>
           <li>Files will download automatically as they're created</li>
           <li>Each file will have a "Phone" header column</li>
         </ul>
